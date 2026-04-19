@@ -3,8 +3,7 @@ name = "spawnhub-example-openai-agents"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "openai-agents>=0.0.3",
-    "spawnhub-openai-agents>=0.1.0",
+    "spawnhub[openai]>=0.1.0",
     "python-dotenv>=1.0.0",
 ]
 

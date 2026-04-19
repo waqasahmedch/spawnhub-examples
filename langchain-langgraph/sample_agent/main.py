@@ -17,7 +17,8 @@ Usage:
 
 Environment:
     OPENAI_API_KEY      Required — used by the LangChain agent
-    SPAWNHUB_ENDPOINT   OTLP endpoint (default: http://localhost:8000/v1/traces)
+    SPAWNHUB_ENDPOINT   SpawnHub base URL (default: http://localhost:8000)
+    SPAWNHUB_API_KEY    Tenant API key (optional for local dev)
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 from sample_agent.telemetry import setup as setup_telemetry
 
 setup_telemetry(
-    otlp_endpoint=os.getenv("SPAWNHUB_ENDPOINT", "http://localhost:8000/v1/traces")
+    endpoint=os.getenv("SPAWNHUB_ENDPOINT", "http://localhost:8000"),
+    api_key=os.getenv("SPAWNHUB_API_KEY", ""),
 )
 
 import uvicorn  # noqa: E402

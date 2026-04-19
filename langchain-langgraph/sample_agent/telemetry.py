@@ -1,46 +1,38 @@
 """
 OTEL setup for the sample agent.
 
-Call setup() once at startup before any LangChain imports are used.
-Uses SimpleSpanProcessor so spans reach SpawnHub immediately (no buffering).
+Delegates to the spawnhub SDK so configuration is consistent with all
+other SpawnHub-instrumented agents.
 
 Note: opentelemetry-instrumentation-langchain is not used here — it is
-incompatible with langchain >= 1.2. Instead, SpawnHubCallbackHandler
-(otel_callback.py) handles LLM and tool spans via LangChain callbacks.
+incompatible with langchain >= 1.2. SpawnHubCallbackHandler (otel_callback.py)
+handles LLM and tool spans via LangChain callbacks instead.
 """
 
 from __future__ import annotations
 
 import logging
 
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
 logger = logging.getLogger(__name__)
 
-_initialized = False
+_result = None
 
 
-def setup(otlp_endpoint: str = "http://localhost:8000/v1/traces") -> None:
-    """Configure OTEL with OTLP exporter. Call once at startup."""
-    global _initialized
-    if _initialized:
+def setup(endpoint: str = "http://localhost:8000", api_key: str = "") -> None:
+    """Configure OTEL via the spawnhub SDK. Call once at startup."""
+    global _result
+    if _result is not None:
         return
 
-    resource = Resource.create({"service.name": "spawnhub-sample-agent"})
-    provider = TracerProvider(resource=resource)
-    exporter = OTLPSpanExporter(endpoint=otlp_endpoint)
-    # schedule_delay_millis=600_000 (10 min) — prevents auto-flush during any
-    # realistic pipeline run.  pipeline.py calls force_flush() after the
-    # top-level span closes, so ALL spans arrive in one batch.  The ingestion
-    # endpoint then sorts by startTimeUnixNano → AgentSpawn is always first.
-    provider.add_span_processor(
-        BatchSpanProcessor(exporter, schedule_delay_millis=600_000)
+    from spawnhub import instrument
+    _result = instrument(
+        api_key=api_key,
+        endpoint=endpoint,
+        service_name="spawnhub-sample-agent",
     )
-    trace.set_tracer_provider(provider)
+    logger.info("[SpawnHub] configured -> %s", endpoint)
 
-    _initialized = True
-    logger.info("OTEL configured → %s", otlp_endpoint)
+
+def get_result():
+    """Return the InstrumentResult for force_flush() calls."""
+    return _result
