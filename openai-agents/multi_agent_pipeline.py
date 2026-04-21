@@ -9,15 +9,15 @@ Architecture
 
 Run
 ────────────
-    # 1. Start SpawnHub ingestion (Terminal 1)
-    make ingestion
+    # 1. Start SpawnHub Docker stack (from spawnhub repo)
+    make infra-up
 
-    # 2. Start renderer (Terminal 2)
-    make renderer
+    # 2. Open http://app.localhost in browser and choose a theme
 
-    # 3. Open http://localhost:5173 in browser and choose a theme
+    # 3. Copy .env.example -> .env, set OPENAI_API_KEY and SPAWNHUB_API_KEY
+    cp .env.example .env
 
-    # 4. Run this pipeline (Terminal 3)
+    # 4. Run this pipeline
     python multi_agent_pipeline.py "artificial intelligence in healthcare"
 
 Requirements
@@ -40,7 +40,8 @@ from spawnhub import instrument
 
 # Register SpawnHub before any agent/runner imports
 processor = instrument(
-    endpoint="http://localhost:8000",
+    endpoint=os.getenv("SPAWNHUB_ENDPOINT", "http://ingest.localhost"),
+    api_key=os.getenv("SPAWNHUB_API_KEY", ""),
     pattern="orchestrator",
     personas={
         "Orchestrator":  {"name": "Zara",   "country": "AE", "gender": "female"},

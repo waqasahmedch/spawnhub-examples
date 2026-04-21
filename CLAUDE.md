@@ -11,6 +11,36 @@ This repo is intentionally separate from the main SpawnHub monorepo because:
 - It needs a clean commit history, beginner-friendly code, and good documentation
 - It releases on its own cadence driven by customer feedback and new framework support
 
+## Running SpawnHub (required before running any example)
+
+SpawnHub is deployed as a Docker Compose stack. Start it from the [spawnhub repo](https://github.com/waqasahmedch/spawnhub):
+
+```bash
+make infra-up
+```
+
+Services after startup:
+
+| URL | What |
+|---|---|
+| http://app.localhost | Renderer (Babylon.js game world) |
+| http://ingest.localhost | Ingestion API (via Kong gateway) |
+| http://admin.localhost | Admin UI (direct to ingestion, no Kong) |
+| http://traefik.localhost:8080 | Traefik dashboard |
+
+**Do NOT use `make ingestion` or `make renderer`** — those are for local dev without Docker and will conflict with the stack.
+
+## API key authentication
+
+Kong sits in front of the ingestion endpoints and requires `X-SpawnHub-Key` header on:
+- `POST /v1/traces` — OTLP traces
+- `POST /v1/metrics` — OTLP metrics
+- `POST /v1/events` — direct GameEvent posts (OpenAI Agents SDK adapter)
+
+The dev key is defined in `infra/kong/kong.yml`: `spwnhub_dev_key_replace_me`
+
+WebSocket `/ws` has no auth (renderer uses session-scoped access).
+
 ## How SpawnHub works (context for all examples)
 
 SpawnHub receives OpenTelemetry (OTEL) spans from AI agent frameworks and maps them to game events, rendering each agent as an animated avatar in a browser-based 3D world.
@@ -82,51 +112,13 @@ spawnhub-examples/
 
 Each example is a self-contained Python package with its own `pyproject.toml`.
 
-## Running an example
+## Environment variables (both examples)
 
-### Prerequisites
-
-1. SpawnHub ingestion server running at `http://localhost:8000`
-   ```bash
-   # In the main spawnhub repo:
-   make ingestion
-   ```
-2. SpawnHub renderer running at `http://localhost:5173`
-   ```bash
-   # In the main spawnhub repo:
-   make renderer
-   ```
-3. OpenAI API key
-
-### langchain-langgraph
-
-```bash
-cd langchain-langgraph
-cp .env.example .env      # add OPENAI_API_KEY
-pip install -e .
-
-python -m sample_agent.main   # starts HTTP server on port 8001
-
-# Single agent
-curl -X POST http://localhost:8001/run \
-     -H "Content-Type: application/json" \
-     -d '{"topic": "AI in healthcare"}'
-
-# Full 3-agent pipeline (Orchestrator → ResearchAgent → AnalystAgent)
-curl -X POST http://localhost:8001/run-pipeline \
-     -H "Content-Type: application/json" \
-     -d '{"topic": "AI in healthcare"}'
-```
-
-### openai-agents
-
-```bash
-cd openai-agents
-cp .env.example .env      # add OPENAI_API_KEY
-pip install -e .
-
-python multi_agent_pipeline.py "quantum computing"
-```
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `OPENAI_API_KEY` | yes | — | OpenAI API key |
+| `SPAWNHUB_ENDPOINT` | no | `http://ingest.localhost` | SpawnHub ingestion base URL |
+| `SPAWNHUB_API_KEY` | yes (Docker) | `""` | Kong API key (`X-SpawnHub-Key`) |
 
 ## Adding a new example
 
@@ -135,7 +127,7 @@ Each new example should follow this pattern:
 1. Create a subdirectory named after the framework, e.g. `crewai/`
 2. Include `pyproject.toml`, `README.md`, `.env.example`
 3. **Prefer native OTEL** — check if the framework emits OTEL before writing an adapter
-4. If native OTEL is available: configure `OTLPSpanExporter` pointing to `http://localhost:8000/v1/traces`
+4. If native OTEL is available: configure `OTLPSpanExporter` pointing to `SPAWNHUB_ENDPOINT/v1/traces` with `X-SpawnHub-Key: SPAWNHUB_API_KEY` header
 5. If no OTEL: use `spawnhub-openai-agents` as a reference for writing an adapter that posts to `/v1/events`
 6. Stamp `pipeline.run_id` on all spans in a pipeline run so all agents group into one session
 7. Add the example to the root `README.md`
@@ -148,7 +140,7 @@ All spans from a single pipeline run must share the same `session_id` so SpawnHu
 
 ### Force flush after top-level span
 
-Always call `provider.force_flush()` after the top-level `invoke_agent` span closes. This ensures all spans (including the invoke_agent span itself) export in one batch. SpawnHub then sorts by `startTimeUnixNano` so `agent_spawn` always reaches the renderer before `agent_think`/`agent_action`.
+Always call `provider.force_flush()` after the top-level `invoke_agent` span closes. This ensures all spans export in one batch. SpawnHub then sorts by `startTimeUnixNano` so `agent_spawn` always reaches the renderer before `agent_think`/`agent_action`.
 
 ### Personas drive avatar styling
 
@@ -156,5 +148,5 @@ Setting `agent.persona.country`, `agent.persona.gender`, and `agent.persona.name
 
 ## Related repos
 
-- **SpawnHub platform** — https://github.com/waqasahmedch/spawnhub (ingestion, renderer, admin-ui)
+- **SpawnHub platform** — https://github.com/waqasahmedch/spawnhub (ingestion, renderer, admin-ui, Docker stack)
 - **spawnhub-openai-agents** — published as a pip package from `packages/openai-agents-adapter` in the main repo

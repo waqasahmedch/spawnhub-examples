@@ -4,8 +4,13 @@ Sample agents that stream live telemetry to [SpawnHub](https://spawnhub.ai) — 
 
 ## Prerequisites
 
-1. A running SpawnHub ingestion server (see [SpawnHub repo](https://github.com/waqasahmedch/spawnhub))
-2. An OpenAI API key
+1. SpawnHub Docker stack running (from the [spawnhub repo](https://github.com/waqasahmedch/spawnhub)):
+   ```bash
+   make infra-up
+   ```
+2. Open **http://app.localhost** in your browser and pick a theme
+3. An OpenAI API key
+4. A SpawnHub API key — for local dev use `spwnhub_dev_key_replace_me` (defined in `infra/kong/kong.yml`)
 
 ## Examples
 
@@ -15,8 +20,8 @@ A 3-agent orchestrator pipeline (Orchestrator → ResearchAgent → AnalystAgent
 
 ```bash
 cd langchain-langgraph
-cp .env.example .env          # add your OPENAI_API_KEY
-pip install -e .
+cp .env.example .env          # add your OPENAI_API_KEY + SPAWNHUB_API_KEY
+uv pip install -e .
 python -m sample_agent.main   # starts on port 8001
 
 # Trigger a run
@@ -31,10 +36,18 @@ A 3-agent pipeline (Orchestrator → ResearchAgent → WriterAgent) using the Op
 
 ```bash
 cd openai-agents
-cp .env.example .env          # add your OPENAI_API_KEY
-pip install -e .
+cp .env.example .env          # add your OPENAI_API_KEY + SPAWNHUB_API_KEY
+uv pip install -e .
 python multi_agent_pipeline.py "quantum computing"
 ```
+
+## Ingestion endpoints (Docker stack)
+
+| Path | Auth | Used by |
+|---|---|---|
+| `POST http://ingest.localhost/v1/traces` | `X-SpawnHub-Key` header | LangChain, LangGraph, CrewAI, AutoGen, Google ADK |
+| `POST http://ingest.localhost/v1/events` | `X-SpawnHub-Key` header | OpenAI Agents SDK adapter |
+| `ws://ingest.localhost/ws` | none | Renderer (read-only live stream) |
 
 ## How it works
 

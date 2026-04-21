@@ -10,13 +10,23 @@ A 3-agent research pipeline built with LangGraph's ReAct pattern that streams li
 | ResearchAgent | Ibrahim (SA) | Web search + information gathering |
 | AnalystAgent | Zainab (TR) | Fact extraction + report writing |
 
+## Prerequisites
+
+SpawnHub Docker stack running:
+```bash
+# In the spawnhub repo:
+make infra-up
+# Open http://app.localhost in browser
+```
+
 ## Setup
 
 ```bash
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
+# Edit .env — set OPENAI_API_KEY and SPAWNHUB_API_KEY
+# SPAWNHUB_API_KEY for local dev: spwnhub_dev_key_replace_me (see infra/kong/kong.yml)
 
-pip install -e .
+uv pip install -e .
 ```
 
 ## Run
@@ -36,9 +46,11 @@ curl -X POST http://localhost:8001/run-pipeline \
      -d '{"topic": "AI in healthcare"}'
 ```
 
+Watch the avatars appear in real time at **http://app.localhost**.
+
 ## How OTEL is wired
 
-- `telemetry.py` — configures the OTLP exporter pointing at SpawnHub
+- `telemetry.py` — configures the OTLP exporter pointing at `SPAWNHUB_ENDPOINT` with `SPAWNHUB_API_KEY`
 - `otel_callback.py` — LangChain callback handler that emits LLM + tool spans
 - `agent.py` / `pipeline.py` — manually start `invoke_agent` spans; callbacks handle child spans
 
