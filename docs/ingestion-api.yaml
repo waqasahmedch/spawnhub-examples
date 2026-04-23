@@ -1,0 +1,1208 @@
+openapi: 3.1.0
+
+info:
+  title: SpawnHub Ingestion API
+  version: 0.2.0
+  description: |
+    The SpawnHub Ingestion API receives AI agent telemetry and streams it to the
+    game renderer in real time. Agents appear as animated avatars in a 2D/3D world.
+
+    ## Data hierarchy
+
+    ```
+    subscription (company)
+      └── tenant  (team / project — owns the API key)
+            └── workflow_id  (named pipeline, e.g. "research-bot")
+                  └── session_id  (one execution run of that workflow)
+                        └── events  (individual game events)
+    ```
+
+    ## Ingestion paths
+
+    | Path | Protocol | Auth | Recommended for |
+    |---|---|---|---|
+    | `POST /v1/traces` | HTTP | `X-SpawnHub-Key` | LangChain · LangGraph · CrewAI · AutoGen · Google ADK · Semantic Kernel |
+    | `POST /v1/events` | HTTP | `X-SpawnHub-Key` | OpenAI Agents SDK · n8n · custom adapters |
+    | `GET  /ws`        | WebSocket | none | Renderer live stream (read-only) |
+
+    ## Framework support matrix
+
+    | Framework | Language | Integration path | `gen_ai.system` value |
+    |---|---|---|---|
+    | LangChain | Python | OTLP → `/v1/traces` | `langchain` |
+    | LangGraph | Python | OTLP → `/v1/traces` | `langgraph` |
+    | AutoGen / AG2 | Python | OTLP → `/v1/traces` | `autogen` / `ag2` |
+    | CrewAI | Python | OTLP → `/v1/traces` | `crewai` |
+    | Google ADK | Python | OTLP → `/v1/traces` | `google_adk` / `vertex_ai` |
+    | Semantic Kernel | Python / C# | OTLP → `/v1/traces` | `semantic_kernel` |
+    | OpenAI Agents SDK | Python | Hooks → `/v1/events` | N/A (no native OTEL) |
+    | n8n | Visual | HTTP Request → `/v1/events` | N/A |
+
+    ## Authentication
+
+    All write endpoints require an API key in the `X-SpawnHub-Key` header.
+    Keys are provisioned per tenant via the Admin API.
+    The WebSocket and replay endpoints are read-only and require no authentication.
+
+servers:
+  - url: http://ingest.localhost
+    description: Local Docker stack
+  - url: https://ingest.spawnhub.ai
+    description: Production
+
+tags:
+  - name: Ingestion
+    description: Write telemetry — accepts OTLP spans or direct GameEvents
+  - name: Replay
+    description: Read past workflow sessions for replay in the renderer
+  - name: Admin — Subscriptions
+    description: Company-level billing boundaries (admin.localhost only)
+  - name: Admin — Tenants
+    description: Team/project-level API key management (admin.localhost only)
+  - name: Admin — Workflows
+    description: Read-only workflow and session queries (admin.localhost only)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Paths
+# ──────────────────────────────────────────────────────────────────────────────
+
+paths:
+
+  # ── Ingestion ────────────────────────────────────────────────────────────────
+
+  /v1/traces:
+    post:
+      tags: [Ingestion]
+      summary: Ingest OTLP traces
+      description: |
+        Accepts OpenTelemetry traces in OTLP JSON or protobuf format.
+        Each span is translated into one or more GameEvents and:
+        1. Published to the WebSocket bus (live renderer updates)
+        2. Persisted to PostgreSQL (replay)
+
+        ### Supported content types
+        - `application/json` — OTLP JSON (preferred for SDK HTTP exporters)
+        - `application/x-protobuf` — OTLP protobuf (used by gRPC-native exporters)
+
+        ### Required headers
+        | Header | Description |
+        |---|---|
+        | `X-SpawnHub-Key` | Tenant API key |
+        | `Content-Type` | `application/json` or `application/x-protobuf` |
+
+        ### Optional headers
+        | Header | Description |
+        |---|---|
+        | `X-Workflow-ID` | Groups multiple sessions under a named workflow |
+
+        ### OTEL span → GameEvent mapping
+        SpawnHub classifies each span by the `gen_ai.operation.name` attribute first,
+        then falls back to matching the span name:
+
+        | `gen_ai.operation.name` (or span name pattern) | GameEvent emitted |
+        |---|---|
+        | `invoke_agent` / `create_agent` / `execute_agent` | `agent_spawn` + `agent_complete` |
+        | `chat` / `completion` / `generate` / `text_completion` | `agent_think` |
+        | `execute_tool` / `tool_call` / `function_call` | `agent_action` |
+        | `retrieve` / `retrieval` / `embeddings` / `similarity_search` | `agent_retrieve` |
+
+        ### SpawnHub-specific span attributes
+        These attributes are optional but improve the visual experience.
+        They can be set using the OTEL `Span.set_attribute()` API:
+
+        | Attribute | Type | Description |
+        |---|---|---|
+        | `pipeline.run_id` | string | Groups all spans in a multi-agent run into one session |
+        | `pipeline.pattern` | string | `orchestrator` \| `sequential` \| `parallel` \| `conversational` \| `reflection` |
+        | `pipeline.parent_span_id` | string | Links LLM/tool spans to their owning invoke_agent span |
+        | `agent.persona.name` | string | Avatar display name override |
+        | `agent.persona.gender` | string | `male` \| `female` |
+        | `agent.persona.country` | string | ISO 3166-1 alpha-2 (e.g. `SA`, `US`, `JP`) |
+
+        ### Framework-specific notes
+
+        **LangChain / LangGraph** — `gen_ai.system` auto-set by `langchain-opentelemetry`.
+        Set `pipeline.run_id` on the root tracer span to group sub-agents into one session.
+
+        **AutoGen / AG2** — Enable OTEL with `OtelTracingConfig`. `gen_ai.system` = `autogen`.
+        Use `pipeline.run_id` = conversation ID.
+
+        **CrewAI** — Enable with `OTEL_EXPORTER_OTLP_ENDPOINT` env var.
+        `gen_ai.system` = `crewai`. Each crew run = one session.
+
+        **Google ADK** — Enable with `GOOGLE_GENAI_OBSERVABILITY_ENABLED=true` + OTLP exporter.
+        `gen_ai.system` = `google_adk` or `vertex_ai`.
+
+        **Semantic Kernel** — Use `opentelemetry-instrumentation-semantic-kernel`.
+        `gen_ai.system` = `semantic_kernel`. Both Python and C# SDKs are supported.
+
+        **Session grouping** — All spans sharing the same `pipeline.run_id` are grouped
+        into one `session_id`. Single-agent runs (no `pipeline.run_id`) fall back to
+        `trace_id` as the session identifier.
+      security:
+        - ApiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTLPTracesPayload'
+            examples:
+              langchain:
+                summary: LangChain / LangGraph — orchestrator invoke_agent span
+                value:
+                  resourceSpans:
+                    - resource:
+                        attributes:
+                          - key: service.name
+                            value: { stringValue: "my-langgraph-app" }
+                      scopeSpans:
+                        - spans:
+                            - traceId: "abc123"
+                              spanId: "span001"
+                              name: "invoke_agent"
+                              startTimeUnixNano: "1714000000000000000"
+                              endTimeUnixNano:   "1714000010000000000"
+                              attributes:
+                                - key: gen_ai.operation.name
+                                  value: { stringValue: "invoke_agent" }
+                                - key: gen_ai.system
+                                  value: { stringValue: "langgraph" }
+                                - key: gen_ai.agent.name
+                                  value: { stringValue: "ResearchAgent" }
+                                - key: pipeline.run_id
+                                  value: { stringValue: "run-langgraph-001" }
+                                - key: pipeline.pattern
+                                  value: { stringValue: "orchestrator" }
+                                - key: agent.persona.name
+                                  value: { stringValue: "Ibrahim" }
+                                - key: agent.persona.country
+                                  value: { stringValue: "SA" }
+              autogen:
+                summary: AutoGen / AG2 — conversational multi-agent
+                value:
+                  resourceSpans:
+                    - resource:
+                        attributes:
+                          - key: service.name
+                            value: { stringValue: "autogen-pipeline" }
+                      scopeSpans:
+                        - spans:
+                            - traceId: "def456"
+                              spanId: "span-ag-001"
+                              name: "invoke_agent"
+                              startTimeUnixNano: "1714001000000000000"
+                              endTimeUnixNano:   "1714001030000000000"
+                              attributes:
+                                - key: gen_ai.operation.name
+                                  value: { stringValue: "invoke_agent" }
+                                - key: gen_ai.system
+                                  value: { stringValue: "autogen" }
+                                - key: gen_ai.agent.name
+                                  value: { stringValue: "AssistantAgent" }
+                                - key: pipeline.run_id
+                                  value: { stringValue: "conv-session-001" }
+                                - key: pipeline.pattern
+                                  value: { stringValue: "conversational" }
+              crewai:
+                summary: CrewAI — sequential pipeline
+                value:
+                  resourceSpans:
+                    - resource:
+                        attributes:
+                          - key: service.name
+                            value: { stringValue: "crewai-research-crew" }
+                      scopeSpans:
+                        - spans:
+                            - traceId: "ghi789"
+                              spanId: "span-crew-001"
+                              name: "invoke_agent"
+                              startTimeUnixNano: "1714002000000000000"
+                              endTimeUnixNano:   "1714002020000000000"
+                              attributes:
+                                - key: gen_ai.operation.name
+                                  value: { stringValue: "invoke_agent" }
+                                - key: gen_ai.system
+                                  value: { stringValue: "crewai" }
+                                - key: gen_ai.agent.name
+                                  value: { stringValue: "ResearcherAgent" }
+                                - key: pipeline.run_id
+                                  value: { stringValue: "crew-run-001" }
+                                - key: pipeline.pattern
+                                  value: { stringValue: "sequential" }
+              google_adk:
+                summary: Google ADK — parallel tool-using agent
+                value:
+                  resourceSpans:
+                    - resource:
+                        attributes:
+                          - key: service.name
+                            value: { stringValue: "google-adk-pipeline" }
+                      scopeSpans:
+                        - spans:
+                            - traceId: "jkl012"
+                              spanId: "span-adk-001"
+                              name: "invoke_agent"
+                              startTimeUnixNano: "1714003000000000000"
+                              endTimeUnixNano:   "1714003015000000000"
+                              attributes:
+                                - key: gen_ai.operation.name
+                                  value: { stringValue: "invoke_agent" }
+                                - key: gen_ai.system
+                                  value: { stringValue: "google_adk" }
+                                - key: gen_ai.agent.name
+                                  value: { stringValue: "DataAgent" }
+                                - key: pipeline.run_id
+                                  value: { stringValue: "adk-run-001" }
+                                - key: pipeline.pattern
+                                  value: { stringValue: "parallel" }
+              semantic_kernel:
+                summary: Semantic Kernel (Python/C#) — reflection loop
+                value:
+                  resourceSpans:
+                    - resource:
+                        attributes:
+                          - key: service.name
+                            value: { stringValue: "sk-agent-app" }
+                      scopeSpans:
+                        - spans:
+                            - traceId: "mno345"
+                              spanId: "span-sk-001"
+                              name: "invoke_agent"
+                              startTimeUnixNano: "1714004000000000000"
+                              endTimeUnixNano:   "1714004025000000000"
+                              attributes:
+                                - key: gen_ai.operation.name
+                                  value: { stringValue: "invoke_agent" }
+                                - key: gen_ai.system
+                                  value: { stringValue: "semantic_kernel" }
+                                - key: gen_ai.agent.name
+                                  value: { stringValue: "PlannerAgent" }
+                                - key: pipeline.run_id
+                                  value: { stringValue: "sk-run-001" }
+                                - key: pipeline.pattern
+                                  value: { stringValue: "reflection" }
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTLPIngestResponse'
+              example:
+                partialSuccess: {}
+                session_ids: ["run-xyz-001"]
+        '400':
+          description: Malformed payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/events:
+    post:
+      tags: [Ingestion]
+      summary: Ingest GameEvents directly
+      description: |
+        Accepts a JSON array (or single object) of GameEvents. Used by adapter SDKs
+        for frameworks that don't emit native OTEL (OpenAI Agents SDK, n8n, custom adapters).
+
+        The `event_type` field is the discriminator — one of:
+        `agent_spawn` | `agent_think` | `agent_action` | `agent_retrieve` | `agent_complete`
+
+        ### When to use this endpoint vs /v1/traces
+        Use `/v1/events` when:
+        - Your framework does not emit native OTEL (OpenAI Agents SDK, n8n)
+        - You are building a custom adapter
+        - You want full control over the event schema
+
+        Use `/v1/traces` when:
+        - Your framework already emits OTEL (LangChain, LangGraph, AutoGen, CrewAI, Google ADK, Semantic Kernel)
+
+        ### n8n Integration
+        In an n8n workflow, add an **HTTP Request** node after each AI step:
+        - **Method:** POST
+        - **URL:** `http://ingest.localhost/v1/events`
+        - **Headers:** `X-SpawnHub-Key: your-api-key`, `Content-Type: application/json`
+        - **Body:** JSON array of GameEvents (see n8n example below)
+
+        Use n8n **expressions** to populate dynamic fields:
+        - `session_id`: `{{ $workflow.id }}-{{ $execution.id }}`
+        - `agent_name`: `{{ $node["AI Agent"].name }}`
+        - `timestamp`: `{{ new Date().toISOString() }}`
+      security:
+        - ApiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/GameEvent'
+                - type: array
+                  items:
+                    $ref: '#/components/schemas/GameEvent'
+            examples:
+              openai_agents_spawn:
+                summary: OpenAI Agents SDK — agent_spawn via adapter hook
+                value:
+                  event_type: agent_spawn
+                  session_id: "oai-run-abc001"
+                  trace_id: "oai-trace-001"
+                  span_id: "oai-span-001"
+                  agent_id: "oai-span-001"
+                  agent_name: "Orchestrator"
+                  parent_agent_id: null
+                  pattern: "orchestrator"
+                  timestamp: "2026-04-22T10:00:00Z"
+                  agent_type: "openai_agents"
+                  persona:
+                    name: "Zara"
+                    gender: "female"
+                    country: "AE"
+                    framework: "openai"
+              openai_agents_batch:
+                summary: OpenAI Agents SDK — batch spawn + think + action
+                value:
+                  - event_type: agent_spawn
+                    session_id: "oai-run-abc001"
+                    trace_id: "oai-trace-001"
+                    span_id: "oai-span-001"
+                    agent_id: "oai-span-001"
+                    agent_name: "Orchestrator"
+                    parent_agent_id: null
+                    pattern: "orchestrator"
+                    timestamp: "2026-04-22T10:00:00Z"
+                    agent_type: "openai_agents"
+                    persona: { name: "Zara", gender: "female", country: "AE", framework: "openai" }
+                  - event_type: agent_think
+                    session_id: "oai-run-abc001"
+                    trace_id: "oai-trace-001"
+                    span_id: "oai-span-002"
+                    agent_id: "oai-span-001"
+                    agent_name: "Orchestrator"
+                    pattern: "orchestrator"
+                    timestamp: "2026-04-22T10:00:01Z"
+                    model: "gpt-4o"
+                    prompt_tokens: 512
+                    completion_tokens: 128
+                  - event_type: agent_action
+                    session_id: "oai-run-abc001"
+                    trace_id: "oai-trace-001"
+                    span_id: "oai-span-003"
+                    agent_id: "oai-span-001"
+                    agent_name: "Orchestrator"
+                    pattern: "orchestrator"
+                    timestamp: "2026-04-22T10:00:03Z"
+                    tool_name: "web_search"
+                    tool_input: { "query": "AI trends 2026" }
+              n8n_workflow:
+                summary: n8n — HTTP Request node payload for an AI Agent step
+                value:
+                  - event_type: agent_spawn
+                    session_id: "n8n-wf123-exec456"
+                    trace_id: "n8n-wf123-exec456"
+                    span_id: "n8n-node-aiagent-001"
+                    agent_id: "n8n-node-aiagent-001"
+                    agent_name: "AI Research Agent"
+                    parent_agent_id: null
+                    pattern: "sequential"
+                    timestamp: "2026-04-22T10:00:00Z"
+                    agent_type: "n8n.ai_agent"
+                    persona: { framework: "langchain" }
+                  - event_type: agent_complete
+                    session_id: "n8n-wf123-exec456"
+                    trace_id: "n8n-wf123-exec456"
+                    span_id: "n8n-node-aiagent-001-complete"
+                    agent_id: "n8n-node-aiagent-001"
+                    agent_name: "AI Research Agent"
+                    pattern: "sequential"
+                    timestamp: "2026-04-22T10:00:12Z"
+                    success: true
+              custom_adapter:
+                summary: Custom adapter — minimal required fields
+                value:
+                  event_type: agent_spawn
+                  session_id: "my-run-001"
+                  trace_id: "my-trace-001"
+                  span_id: "my-span-001"
+                  agent_id: "my-span-001"
+                  agent_name: "MyAgent"
+                  pattern: "orchestrator"
+                  timestamp: "2026-04-22T10:00:00Z"
+                  agent_type: "custom"
+                  persona: {}
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsIngestResponse'
+              example:
+                accepted: 3
+                session_ids: ["oai-run-abc001"]
+
+  # ── Replay ───────────────────────────────────────────────────────────────────
+
+  /sessions:
+    get:
+      tags: [Replay]
+      summary: List all workflow sessions
+      description: |
+        Returns all past agent sessions (workflow instances), newest first.
+        Each session groups all events from one pipeline run.
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+              example:
+                - session_id: "run-xyz-001"
+                  started_at: "2026-04-22T10:00:00Z"
+                  ended_at:   "2026-04-22T10:00:45Z"
+                  event_count: 22
+                  agent_count: 3
+                  agent_names: "Orchestrator,ResearchAgent,WriterAgent"
+                  pattern: "orchestrator"
+                  tenant_id: "t-abc123"
+                  workflow_id: "research-bot"
+
+  /sessions/{session_id}/events:
+    get:
+      tags: [Replay]
+      summary: Get events for a session
+      description: Returns all GameEvents for a session ordered by timestamp ascending, for replay.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The session_id returned by GET /sessions
+      responses:
+        '200':
+          description: Ordered list of GameEvents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameEvent'
+        '404':
+          description: Session not found
+
+  # ── WebSocket ─────────────────────────────────────────────────────────────────
+
+  /ws:
+    get:
+      tags: [Ingestion]
+      summary: Real-time GameEvent stream (WebSocket)
+      description: |
+        Upgrade to a WebSocket connection to receive a live stream of GameEvents.
+        Every event ingested via `POST /v1/traces` or `POST /v1/events` is fanned
+        out to all connected WebSocket clients simultaneously.
+
+        **Connection:** `ws://ingest.localhost/ws`
+        **Auth:** none required
+        **Protocol:** each message is a JSON-serialised `GameEvent` object
+
+        ```js
+        const ws = new WebSocket("ws://ingest.localhost/ws");
+        ws.onmessage = (msg) => {
+          const event = JSON.parse(msg.data); // GameEvent
+          console.log(event.event_type, event.agent_name);
+        };
+        ```
+      responses:
+        '101':
+          description: Switching Protocols — WebSocket upgrade successful
+
+  # ── Admin — Subscriptions ────────────────────────────────────────────────────
+
+  /admin/api/subscriptions:
+    get:
+      tags: [Admin — Subscriptions]
+      summary: List subscriptions
+      servers:
+        - url: http://admin.localhost
+      responses:
+        '200':
+          description: List of subscriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Subscription'
+    post:
+      tags: [Admin — Subscriptions]
+      summary: Create subscription
+      servers:
+        - url: http://admin.localhost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionCreate'
+            example:
+              company_name: "Acme Corp"
+              plan: "free_trial"
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /admin/api/subscriptions/{subscription_id}:
+    delete:
+      tags: [Admin — Subscriptions]
+      summary: Delete subscription
+      servers:
+        - url: http://admin.localhost
+      parameters:
+        - name: subscription_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+
+  # ── Admin — Tenants ──────────────────────────────────────────────────────────
+
+  /admin/api/tenants:
+    get:
+      tags: [Admin — Tenants]
+      summary: List tenants
+      servers:
+        - url: http://admin.localhost
+      parameters:
+        - name: subscription_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by subscription
+      responses:
+        '200':
+          description: List of tenants
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tenant'
+    post:
+      tags: [Admin — Tenants]
+      summary: Create tenant
+      servers:
+        - url: http://admin.localhost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantCreate'
+            example:
+              subscription_id: "sub-abc123"
+              tenant_name: "Team Alpha"
+      responses:
+        '201':
+          description: Created — includes generated api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+
+  /admin/api/tenants/{tenant_id}:
+    delete:
+      tags: [Admin — Tenants]
+      summary: Delete tenant
+      servers:
+        - url: http://admin.localhost
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+
+  /admin/api/tenants/{tenant_id}/regenerate-key:
+    post:
+      tags: [Admin — Tenants]
+      summary: Regenerate API key
+      servers:
+        - url: http://admin.localhost
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: New key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_key:
+                    type: string
+                    example: "spwnhub_Xk9..."
+
+  # ── Admin — Workflows ────────────────────────────────────────────────────────
+
+  /admin/api/workflows:
+    get:
+      tags: [Admin — Workflows]
+      summary: List workflows for a tenant
+      servers:
+        - url: http://admin.localhost
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of workflows (derived from events)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Workflow'
+
+  /admin/api/sessions:
+    get:
+      tags: [Admin — Workflows]
+      summary: List sessions by workflow or tenant
+      servers:
+        - url: http://admin.localhost
+      parameters:
+        - name: workflow_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+        '422':
+          description: Provide workflow_id or tenant_id
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Components
+# ──────────────────────────────────────────────────────────────────────────────
+
+components:
+
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-SpawnHub-Key
+
+  parameters:
+    WorkflowIdHeader:
+      name: X-Workflow-ID
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Groups multiple sessions under a named workflow (e.g. "research-bot")
+
+  schemas:
+
+    # ── OTLP ──────────────────────────────────────────────────────────────────
+
+    OTLPTracesPayload:
+      type: object
+      description: OTLP ExportTraceServiceRequest (JSON format)
+      properties:
+        resourceSpans:
+          type: array
+          items:
+            type: object
+            properties:
+              resource:
+                type: object
+                properties:
+                  attributes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OTLPKeyValue'
+              scopeSpans:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    spans:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/OTLPSpan'
+
+    OTLPSpan:
+      type: object
+      required: [traceId, spanId, name, startTimeUnixNano, endTimeUnixNano]
+      properties:
+        traceId:
+          type: string
+          description: Hex-encoded 128-bit trace ID
+          example: "4bf92f3577b34da6a3ce929d0e0e4736"
+        spanId:
+          type: string
+          description: Hex-encoded 64-bit span ID
+          example: "00f067aa0ba902b7"
+        parentSpanId:
+          type: string
+          description: Parent span ID — empty string for root spans. Used to build agent hierarchy.
+        name:
+          type: string
+          description: |
+            Span name used for fallback classification when gen_ai.operation.name is absent.
+            SpawnHub matches: `agent` / `invoke_agent` → spawn; `chat` / `llm` / `completion` → think;
+            `tool` → action; `retriev` / `search` / `embed` → retrieve.
+          example: "invoke_agent"
+        startTimeUnixNano:
+          type: string
+          description: Unix timestamp in nanoseconds (as string)
+          example: "1714000000000000000"
+        endTimeUnixNano:
+          type: string
+          example: "1714000005000000000"
+        attributes:
+          type: array
+          items:
+            $ref: '#/components/schemas/OTLPKeyValue'
+          description: |
+            ### GenAI Semantic Convention attributes (auto-emitted by frameworks)
+
+            | Attribute | Type | Description |
+            |---|---|---|
+            | `gen_ai.operation.name` | string | Primary classifier: `invoke_agent` \| `chat` \| `execute_tool` \| `retrieve` |
+            | `gen_ai.system` | string | Framework identifier — see values below |
+            | `gen_ai.agent.name` | string | Avatar display name |
+            | `gen_ai.request.model` | string | LLM model (think events) |
+            | `gen_ai.usage.input_tokens` | int | Prompt token count |
+            | `gen_ai.usage.output_tokens` | int | Completion token count |
+            | `gen_ai.tool.name` | string | Tool name (action events) |
+            | `gen_ai.tool.call.arguments` | string | JSON-encoded tool arguments |
+            | `gen_ai.retrieval.query` | string | Retrieval query text |
+            | `gen_ai.retrieval.source` | string | Vector store / knowledge base name |
+
+            ### `gen_ai.system` values recognised by SpawnHub
+
+            | Value | Framework | Avatar livery |
+            |---|---|---|
+            | `langchain` / `langchain_core` | LangChain | Black + orange ⛓ |
+            | `langgraph` | LangGraph | Navy + blue ◈ |
+            | `openai` / `openai_agents` | OpenAI | Dark + green ◎ |
+            | `google_adk` / `vertex_ai` / `vertexai` | Google ADK | Blue + green G |
+            | `autogen` / `pyautogen` / `ag2` / `microsoft` | AutoGen / AG2 | Blue + cyan A |
+            | `crewai` | CrewAI | Navy + gold ⚓ |
+            | `anthropic` / `claude` | Anthropic | Terracotta + sand ◇ |
+            | `semantic_kernel` / `sk` | Semantic Kernel | Default livery |
+
+            ### SpawnHub-specific attributes (set manually in your code)
+
+            | Attribute | Type | Description |
+            |---|---|---|
+            | `pipeline.run_id` | string | **Recommended** — groups all spans in one multi-agent run into a single session. Falls back to trace_id if absent. |
+            | `pipeline.pattern` | string | `orchestrator` \| `sequential` \| `parallel` \| `conversational` \| `reflection` — drives renderer theme |
+            | `pipeline.parent_span_id` | string | Links LLM/tool spans to the owning `invoke_agent` span (if OTEL parentSpanId is not sufficient) |
+            | `agent.persona.name` | string | Override avatar display name |
+            | `agent.persona.gender` | string | `male` \| `female` |
+            | `agent.persona.country` | string | ISO 3166-1 alpha-2 — adds flag badge to avatar |
+        status:
+          type: object
+          properties:
+            code:
+              type: integer
+              description: "0=unset, 1=ok, 2=error"
+
+    OTLPKeyValue:
+      type: object
+      properties:
+        key:
+          type: string
+        value:
+          type: object
+          description: "One of: { stringValue }, { intValue }, { boolValue }, { doubleValue }"
+
+    OTLPIngestResponse:
+      type: object
+      properties:
+        partialSuccess:
+          type: object
+          description: Standard OTLP success envelope (empty object = all spans accepted)
+        session_ids:
+          type: array
+          items:
+            type: string
+          description: Unique session_ids derived from the ingested spans
+
+    EventsIngestResponse:
+      type: object
+      properties:
+        accepted:
+          type: integer
+          description: Number of events successfully accepted
+        session_ids:
+          type: array
+          items:
+            type: string
+          description: Unique session_ids present in the accepted events
+
+    # ── GameEvent ─────────────────────────────────────────────────────────────
+
+    BaseGameEvent:
+      type: object
+      required: [event_type, session_id, trace_id, span_id, agent_id, agent_name, pattern, timestamp]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Auto-generated unique event identifier
+        event_type:
+          type: string
+          enum: [agent_spawn, agent_think, agent_action, agent_retrieve, agent_complete]
+          description: Discriminator field — determines which subtype this is
+        session_id:
+          type: string
+          description: |
+            One execution run of a workflow. Derived from `pipeline.run_id` OTEL attribute
+            (for multi-agent runs) or `trace_id` (for single-agent runs).
+            For /v1/events, set this to a stable ID that groups all events in one run
+            (e.g. conversation ID, workflow execution ID, trace ID).
+          example: "run-xyz-001"
+        trace_id:
+          type: string
+          description: OTEL trace ID. For /v1/events callers, use any unique string.
+        span_id:
+          type: string
+          description: OTEL span ID of this event's source span
+        agent_id:
+          type: string
+          description: |
+            Identifies the avatar in the game world. Must be stable across all events
+            for the same agent within a session. For OTLP path, this equals the
+            span_id of the invoke_agent span. For /v1/events, use any stable unique ID.
+        agent_name:
+          type: string
+          description: Display name shown above the avatar
+          example: "ResearchAgent"
+        parent_agent_id:
+          type: string
+          nullable: true
+          description: agent_id of the parent agent — establishes the sub-agent hierarchy
+        pattern:
+          type: string
+          enum: [orchestrator, sequential, parallel, conversational, reflection]
+          description: Agentic design pattern — drives which renderer theme auto-activates
+        timestamp:
+          type: string
+          format: date-time
+        tenant_id:
+          type: string
+          nullable: true
+        workflow_id:
+          type: string
+          nullable: true
+          description: Named workflow this session belongs to (from X-Workflow-ID header)
+
+    PersonaConfig:
+      type: object
+      description: |
+        Optional avatar persona — drives visual livery, flag badge, and cultural styling.
+        All fields are optional. `framework` is auto-detected from `gen_ai.system` for OTLP
+        ingestion; set it explicitly when using /v1/events.
+      properties:
+        name:
+          type: string
+          nullable: true
+          description: Override the avatar display name
+          example: "Ibrahim"
+        gender:
+          type: string
+          nullable: true
+          enum: [male, female]
+          description: Affects avatar body proportions
+        country:
+          type: string
+          nullable: true
+          description: ISO 3166-1 alpha-2 — adds a country flag badge to the avatar
+          example: "SA"
+        framework:
+          type: string
+          nullable: true
+          description: |
+            Drives avatar colour livery. Auto-detected for OTLP path (from gen_ai.system).
+            Set explicitly for /v1/events.
+            Values: `langchain` | `langgraph` | `openai` | `google_adk` | `autogen` | `crewai` |
+            `anthropic` | `semantic_kernel`
+          example: "langchain"
+
+    AgentSpawnEvent:
+      allOf:
+        - $ref: '#/components/schemas/BaseGameEvent'
+        - type: object
+          required: [agent_type]
+          properties:
+            event_type:
+              type: string
+              enum: [agent_spawn]
+            agent_type:
+              type: string
+              description: Framework agent type string
+              example: "langchain.agent"
+            persona:
+              $ref: '#/components/schemas/PersonaConfig'
+
+    AgentThinkEvent:
+      allOf:
+        - $ref: '#/components/schemas/BaseGameEvent'
+        - type: object
+          required: [model]
+          properties:
+            event_type:
+              type: string
+              enum: [agent_think]
+            model:
+              type: string
+              description: LLM model name
+              example: "gpt-4o"
+            prompt_tokens:
+              type: integer
+              nullable: true
+            completion_tokens:
+              type: integer
+              nullable: true
+
+    AgentActionEvent:
+      allOf:
+        - $ref: '#/components/schemas/BaseGameEvent'
+        - type: object
+          required: [tool_name]
+          properties:
+            event_type:
+              type: string
+              enum: [agent_action]
+            tool_name:
+              type: string
+              example: "web_search"
+            tool_input:
+              type: object
+              nullable: true
+              description: Arbitrary tool input dictionary
+
+    AgentRetrieveEvent:
+      allOf:
+        - $ref: '#/components/schemas/BaseGameEvent'
+        - type: object
+          properties:
+            event_type:
+              type: string
+              enum: [agent_retrieve]
+            query:
+              type: string
+              nullable: true
+            source:
+              type: string
+              nullable: true
+              description: Vector store or knowledge base name
+
+    AgentCompleteEvent:
+      allOf:
+        - $ref: '#/components/schemas/BaseGameEvent'
+        - type: object
+          properties:
+            event_type:
+              type: string
+              enum: [agent_complete]
+            success:
+              type: boolean
+              default: true
+            output_summary:
+              type: string
+              nullable: true
+
+    GameEvent:
+      discriminator:
+        propertyName: event_type
+        mapping:
+          agent_spawn:    '#/components/schemas/AgentSpawnEvent'
+          agent_think:    '#/components/schemas/AgentThinkEvent'
+          agent_action:   '#/components/schemas/AgentActionEvent'
+          agent_retrieve: '#/components/schemas/AgentRetrieveEvent'
+          agent_complete: '#/components/schemas/AgentCompleteEvent'
+      oneOf:
+        - $ref: '#/components/schemas/AgentSpawnEvent'
+        - $ref: '#/components/schemas/AgentThinkEvent'
+        - $ref: '#/components/schemas/AgentActionEvent'
+        - $ref: '#/components/schemas/AgentRetrieveEvent'
+        - $ref: '#/components/schemas/AgentCompleteEvent'
+
+    # ── Replay ────────────────────────────────────────────────────────────────
+
+    Session:
+      type: object
+      properties:
+        session_id:
+          type: string
+          description: Unique identifier for this workflow run
+          example: "run-xyz-001"
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        event_count:
+          type: integer
+        agent_count:
+          type: integer
+        agent_names:
+          type: string
+          description: Comma-separated list of agent names in this session
+          example: "Orchestrator,ResearchAgent,WriterAgent"
+        pattern:
+          type: string
+          example: "orchestrator"
+        tenant_id:
+          type: string
+          nullable: true
+        workflow_id:
+          type: string
+          nullable: true
+
+    # ── Admin ─────────────────────────────────────────────────────────────────
+
+    Subscription:
+      type: object
+      properties:
+        subscription_id:
+          type: string
+          format: uuid
+        company_name:
+          type: string
+        plan:
+          type: string
+          enum: [free_trial, starter, growth, enterprise]
+        status:
+          type: string
+          enum: [active, suspended, cancelled]
+        trial_ends_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: number
+          description: Unix timestamp (float)
+        tenant_count:
+          type: integer
+
+    SubscriptionCreate:
+      type: object
+      required: [company_name]
+      properties:
+        company_name:
+          type: string
+        plan:
+          type: string
+          enum: [free_trial, starter, growth, enterprise]
+          default: free_trial
+
+    Tenant:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        subscription_id:
+          type: string
+        tenant_name:
+          type: string
+        api_key:
+          type: string
+          description: Pass this in X-SpawnHub-Key on ingestion requests
+          example: "spwnhub_Xk9..."
+        status:
+          type: string
+          enum: [active, suspended]
+        created_at:
+          type: number
+        session_count:
+          type: integer
+        event_count:
+          type: integer
+
+    TenantCreate:
+      type: object
+      required: [subscription_id, tenant_name]
+      properties:
+        subscription_id:
+          type: string
+        tenant_name:
+          type: string
+
+    Workflow:
+      type: object
+      properties:
+        workflow_id:
+          type: string
+        tenant_id:
+          type: string
+        first_seen:
+          type: string
+          format: date-time
+        last_seen:
+          type: string
+          format: date-time
+        session_count:
+          type: integer
+        event_count:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string

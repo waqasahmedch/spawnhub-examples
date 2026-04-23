@@ -29,6 +29,7 @@ Requirements
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -39,15 +40,15 @@ load_dotenv(Path(__file__).parent / ".env")
 from spawnhub import instrument
 
 # Register SpawnHub before any agent/runner imports
+_personas: dict = json.loads(
+    (Path(__file__).parent.parent / "agent-persona.json").read_text()
+)
+
 processor = instrument(
     endpoint=os.getenv("SPAWNHUB_ENDPOINT", "http://ingest.localhost"),
     api_key=os.getenv("SPAWNHUB_API_KEY", ""),
     pattern="orchestrator",
-    personas={
-        "Orchestrator":  {"name": "Zara",   "country": "AE", "gender": "female"},
-        "ResearchAgent": {"name": "Ibrahim", "country": "SA", "gender": "male"},
-        "WriterAgent":   {"name": "Leila",   "country": "IR", "gender": "female"},
-    },
+    personas=_personas,
 )
 
 from agents import Agent, Runner, function_tool  # noqa: E402  (import after instrument)

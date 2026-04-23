@@ -1,0 +1,22 @@
+{
+  "Orchestrator": {
+    "name": "Yahya",
+    "gender": "male",
+    "country": "PK"
+  },
+  "ResearchAgent": {
+    "name": "Ibrahim",
+    "gender": "male",
+    "country": "SA"
+  },
+  "AnalystAgent": {
+    "name": "Zainab",
+    "gender": "female",
+    "country": "TR"
+  },
+  "WriterAgent": {
+    "name": "Leila",
+    "gender": "female",
+    "country": "IR"
+  }
+}

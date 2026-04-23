@@ -1,16 +1,16 @@
-# SpawnHub — LangGraph Example
+# SpawnHub — CrewAI Example
 
-A 3-agent research pipeline built with **LangGraph's ReAct pattern** that streams live telemetry to SpawnHub via native OpenTelemetry. Watch three avatars appear and animate in the SpawnHub renderer as the pipeline runs.
+A 3-agent research pipeline built with **CrewAI** that streams live telemetry to SpawnHub. Watch three avatars (Orchestrator, ResearchAgent, AnalystAgent) appear and animate in the SpawnHub renderer as the pipeline runs.
 
 ## How it works
 
 ```
 Orchestrator  (Yahya  / PK)
-├── ResearchAgent (Ibrahim / SA)  — web search + information gathering
-└── AnalystAgent  (Zainab / TR)  — fact extraction + report writing
+├── ResearchAgent (Ibrahim / SA)  — gathers information on the topic
+└── AnalystAgent  (Zainab / TR)  — produces the final structured report
 ```
 
-Each agent is wrapped in an `invoke_agent` OTEL span. A `SpawnHubCallbackHandler` emits child spans for every LLM call (`agent_think`) and tool call (`agent_action`). No SpawnHub SDK needed — standard OTEL spans with GenAI semantic conventions are all SpawnHub requires.
+Each agent runs as a single-agent Crew wrapped in an `invoke_agent` OTEL span. The global OTEL TracerProvider is configured before CrewAI imports so any native instrumentation CrewAI emits is automatically routed to SpawnHub.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ Each agent is wrapped in an `invoke_agent` OTEL span. A `SpawnHubCallbackHandler
 ## Setup
 
 ```bash
-cd langchain-langgraph
+cd crewai
 uv venv && source .venv/bin/activate
 uv pip install -e .
 cp .env.example .env

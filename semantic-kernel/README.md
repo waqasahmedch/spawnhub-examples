@@ -1,16 +1,16 @@
-# SpawnHub — LangGraph Example
+# SpawnHub — Semantic Kernel Example
 
-A 3-agent research pipeline built with **LangGraph's ReAct pattern** that streams live telemetry to SpawnHub via native OpenTelemetry. Watch three avatars appear and animate in the SpawnHub renderer as the pipeline runs.
+A 3-agent research pipeline built with **Microsoft Semantic Kernel** (Python) that streams live telemetry to SpawnHub. Watch three avatars (Orchestrator, ResearchAgent, WriterAgent) appear and animate in the SpawnHub renderer as the pipeline runs.
 
 ## How it works
 
 ```
 Orchestrator  (Yahya  / PK)
-├── ResearchAgent (Ibrahim / SA)  — web search + information gathering
-└── AnalystAgent  (Zainab / TR)  — fact extraction + report writing
+├── ResearchAgent (Ibrahim / SA)  — researches the topic
+└── WriterAgent   (Leila  / IR)  — writes the final report
 ```
 
-Each agent is wrapped in an `invoke_agent` OTEL span. A `SpawnHubCallbackHandler` emits child spans for every LLM call (`agent_think`) and tool call (`agent_action`). No SpawnHub SDK needed — standard OTEL spans with GenAI semantic conventions are all SpawnHub requires.
+Setting `SEMANTICKERNEL_EXPERIMENTAL_GENAI_ENABLE_OTEL_DIAGNOSTICS=true` tells Semantic Kernel to emit `gen_ai.*` spans for every LLM call. These map to **agent_think** events in SpawnHub, giving each avatar a thinking animation during inference.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ Each agent is wrapped in an `invoke_agent` OTEL span. A `SpawnHubCallbackHandler
 ## Setup
 
 ```bash
-cd langchain-langgraph
+cd semantic-kernel
 uv venv && source .venv/bin/activate
 uv pip install -e .
 cp .env.example .env

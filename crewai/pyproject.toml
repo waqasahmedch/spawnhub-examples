@@ -1,11 +1,9 @@
 [project]
-name = "spawnhub-example-langgraph"
+name = "spawnhub-example-crewai"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "langchain>=0.3.0",
-    "langchain-openai>=0.2.0",
-    "langgraph>=0.2.0",
+    "crewai>=0.80.0",
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
     "python-dotenv>=1.0.0",

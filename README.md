@@ -9,25 +9,21 @@ Sample agents that stream live telemetry to [SpawnHub](https://spawnhub.ai) — 
    make infra-up
    ```
 2. Open **http://app.localhost** in your browser and pick a theme
-3. An OpenAI API key
+3. An OpenAI API key (or Google API key for the ADK example)
 4. A SpawnHub API key — for local dev use `spwnhub_dev_key_replace_me` (defined in `infra/kong/kong.yml`)
 
 ## Examples
 
 ### `langchain-langgraph/` — LangGraph multi-agent research pipeline
 
-A 3-agent orchestrator pipeline (Orchestrator → ResearchAgent → AnalystAgent) built with LangGraph's ReAct pattern. Uses native OTEL instrumentation — no SpawnHub SDK needed.
+A 3-agent orchestrator pipeline (Orchestrator → ResearchAgent → AnalystAgent) built with LangGraph's ReAct pattern. Uses native OTEL — no SpawnHub SDK needed.
 
 ```bash
 cd langchain-langgraph
 cp .env.example .env          # add your OPENAI_API_KEY + SPAWNHUB_API_KEY
+uv venv && source .venv/bin/activate
 uv pip install -e .
-python -m sample_agent.main   # starts on port 8001
-
-# Trigger a run
-curl -X POST http://localhost:8001/run-pipeline \
-     -H "Content-Type: application/json" \
-     -d '{"topic": "AI in healthcare"}'
+python pipeline.py "quantum computing"
 ```
 
 ### `openai-agents/` — OpenAI Agents SDK multi-agent pipeline
@@ -37,15 +33,64 @@ A 3-agent pipeline (Orchestrator → ResearchAgent → WriterAgent) using the Op
 ```bash
 cd openai-agents
 cp .env.example .env          # add your OPENAI_API_KEY + SPAWNHUB_API_KEY
+uv venv && source .venv/bin/activate
 uv pip install -e .
 python multi_agent_pipeline.py "quantum computing"
+```
+
+### `crewai/` — CrewAI multi-agent research pipeline
+
+A 3-agent pipeline (Orchestrator → ResearchAgent → AnalystAgent) using CrewAI. Uses native OTEL — no SpawnHub SDK needed.
+
+```bash
+cd crewai
+cp .env.example .env
+uv venv && source .venv/bin/activate
+uv pip install -e .
+python pipeline.py "quantum computing"
+```
+
+### `autogen/` — AutoGen multi-agent research pipeline
+
+A 3-agent pipeline (Orchestrator → ResearchAgent → WriterAgent) using Microsoft AutoGen. Uses native OTEL — no SpawnHub SDK needed.
+
+```bash
+cd autogen
+cp .env.example .env
+uv venv && source .venv/bin/activate
+uv pip install -e .
+python pipeline.py "quantum computing"
+```
+
+### `google-adk/` — Google ADK multi-agent research pipeline
+
+A 3-agent pipeline (Orchestrator → ResearchAgent → WriterAgent) using Google's Agent Development Kit with Gemini. Uses native OTEL via `GOOGLE_GENAI_OBSERVABILITY_ENABLED=true`.
+
+```bash
+cd google-adk
+cp .env.example .env          # add your GOOGLE_API_KEY + SPAWNHUB_API_KEY
+uv venv && source .venv/bin/activate
+uv pip install -e .
+python pipeline.py "quantum computing"
+```
+
+### `semantic-kernel/` — Semantic Kernel multi-agent research pipeline
+
+A 3-agent pipeline (Orchestrator → ResearchAgent → WriterAgent) using Microsoft Semantic Kernel. Uses native OTEL via `SEMANTICKERNEL_EXPERIMENTAL_GENAI_ENABLE_OTEL_DIAGNOSTICS=true`.
+
+```bash
+cd semantic-kernel
+cp .env.example .env
+uv venv && source .venv/bin/activate
+uv pip install -e .
+python pipeline.py "quantum computing"
 ```
 
 ## Ingestion endpoints (Docker stack)
 
 | Path | Auth | Used by |
 |---|---|---|
-| `POST http://ingest.localhost/v1/traces` | `X-SpawnHub-Key` header | LangChain, LangGraph, CrewAI, AutoGen, Google ADK |
+| `POST http://ingest.localhost/v1/traces` | `X-SpawnHub-Key` header | LangGraph, CrewAI, AutoGen, Google ADK, Semantic Kernel |
 | `POST http://ingest.localhost/v1/events` | `X-SpawnHub-Key` header | OpenAI Agents SDK adapter |
 | `ws://ingest.localhost/ws` | none | Renderer (read-only live stream) |
 
